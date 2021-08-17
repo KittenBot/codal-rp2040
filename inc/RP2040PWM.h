@@ -67,7 +67,7 @@ public:
   void disable();
 
   
-  void fillBuffer();
+  void fillBuffer(uint16_t * pBuff);
   void irq(uint16_t slice_mask);
 
 };

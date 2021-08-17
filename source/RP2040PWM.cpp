@@ -9,7 +9,7 @@
 namespace codal
 {
 
-// 10bit and 256 byte per chunk
+// 10bit and 256 samples per chunk
 #define BIT_LEN (1<<10)
 #define CHUNKSZ (256)
 
@@ -21,16 +21,16 @@ extern "C" void isr_pwm_wrap() {
   inst->irq(n);
 }
 
-// TODO: add dual buffer for this
 void RP2040PWM::irq(uint16_t slice_mask){
-  if(playPos < CHUNKSZ){
-    pwm_set_gpio_level(pin->name, buf0[playPos++]);
-    if (playPos == CHUNKSZ){
-      pwm_set_enabled(slice, false);
-      pwm_set_irq_enabled(slice, false);
-      inst->playing = false;
-      inst->fillBuffer();
-    }
+  pwm_set_gpio_level(pin->name, buf0[playPos++]);
+  if (playPos == CHUNKSZ){
+    // pwm_set_enabled(slice, false);
+    // pwm_set_irq_enabled(slice, false);
+    // inst->playing = false;
+    inst->fillBuffer(buf0);
+  } else if (playPos == CHUNKSZ*2){
+    inst->fillBuffer(buf0 + CHUNKSZ);
+    playPos = 0;
   }
 }
 
@@ -39,7 +39,7 @@ RP2040PWM::RP2040PWM(Pin &pin, DataSource &source, int sampleRate, uint16_t id) 
 {
   this->pin = (RP2040Pin *)&pin;
   this->playing = false;
-  buf0 = new uint16_t[CHUNKSZ];
+  buf0 = new uint16_t[CHUNKSZ*2];
 
   gpio_set_function(pin.name, GPIO_FUNC_PWM);
   
@@ -63,24 +63,25 @@ int RP2040PWM::setSampleRate(int frequency)
   return DEVICE_OK;
 }
 
-void RP2040PWM::fillBuffer()
+void RP2040PWM::fillBuffer(uint16_t * pBuff)
 {
   playing = 1;
   output = upstream.pull();
   if (output.length()){
     auto dp = (uint16_t *)output.getBytes();
     bool isMute = true;
+    // check firset 16 bytes if we have meet zero level
     for (int i=0;i<16;i++){
-      if (dp[i] != 512){
+      if (dp[i] != (BIT_LEN/2)){ // zero level at midpoint
         isMute = false;
         break;
       }
     }
     // mute the channel but still keep the irq running.
     if (!isMute){
-      memcpy(buf0, output.getBytes(), output.length());
+      memcpy(pBuff, output.getBytes(), output.length());
     } else {
-      memset(buf0, 0, output.length());
+      memset(pBuff, 0, output.length());
     }
     playPos = 0;
     pwm_set_enabled(slice, true);
@@ -92,7 +93,8 @@ void RP2040PWM::fillBuffer()
 int RP2040PWM::pullRequest()
 {
   if (!playing){
-    fillBuffer();
+    fillBuffer(buf0);
+    fillBuffer(buf0+CHUNKSZ);
   }
   return DEVICE_OK;
 }
