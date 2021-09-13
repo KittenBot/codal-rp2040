@@ -4,6 +4,7 @@
 #include "Event.h"
 
 #include "stdio.h"
+#include "dma.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
@@ -20,17 +21,33 @@ int dmachTx = -1;
 int dmachRx = -1;
 extern "C"
 {
-    static ZSingleWireSerial *inst;
-
-    void isr_uart1(void *p)
-    {
-        
+    ZSingleWireSerial* inst;
+    void isr_uart1 (){
+        uint32_t n = uart1_hw->mis;
+        uart1_hw->icr = n;
+        if (n & UART_UARTIMSC_BEIM_BITS){
+            if (inst && inst->cb)
+                inst->cb(SWS_EVT_DATA_RECEIVED);
+        }
     }
+    void rx_handler(void *p)
+    {
+        if (inst && inst->cb)
+            inst->cb(SWS_EVT_DATA_RECEIVED);
+    }
+
+    void tx_handler(void *p)
+    {
+        if (inst && inst->cb)
+            inst->cb(SWS_EVT_DATA_SENT);
+    }
+
 }
 
 ZSingleWireSerial::ZSingleWireSerial(Pin &p) : DMASingleWireSerial(p)
 {
     inst = this;
+
     pinTx = p.name & 0xfe;
     pinRx = (p.name & 0xfe) + 1;
 
@@ -42,8 +59,28 @@ ZSingleWireSerial::ZSingleWireSerial(Pin &p) : DMASingleWireSerial(p)
     uart_set_hw_flow(uart1, false, false);
     uart_set_fifo_enabled(uart1, false);
 
-    // uart_set_irq_enables(uart1, true, false);
-    // irq_set_enabled(UART1_IRQ, true);
+    // fixed dma channels
+    dmachRx = dma_claim_unused_channel(true);
+    dmachTx = dma_claim_unused_channel(true);
+
+    dma_channel_config c = dma_channel_get_default_config(dmachRx);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    channel_config_set_dreq(&c, DREQ_UART1_RX);
+    dma_channel_configure(dmachRx, &c,
+                          NULL,  // dest
+                          (uint8_t *)&uart1_hw->dr, // src
+                          0, false);
+
+    c = dma_channel_get_default_config(dmachTx);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    channel_config_set_dreq(&c, DREQ_UART1_TX);
+    dma_channel_configure(dmachTx, &c, (uint8_t *)&uart1_hw->dr, NULL, 0, false);
+
+    // enable uart1 break irq, triggered on jacdac ending lo
+    uart_get_hw(uart1)->imsc = UART_UARTIMSC_BEIM_BITS;
+    
 
 }
 
@@ -121,11 +158,8 @@ int ZSingleWireSerial::sendDMA(uint8_t *data, int len)
     if (status != STATUS_TX)
         setMode(SingleWireTx);
 
-    while(len){
-        uart_putc_raw(uart1, *data);
-        data++;
-        len--;
-    }
+    DMA_SetChannelCallback(dmachTx, tx_handler, this);
+    dma_channel_transfer_from_buffer_now(dmachTx, data, len);
 
     return DEVICE_OK;
 }
@@ -134,7 +168,9 @@ int ZSingleWireSerial::receiveDMA(uint8_t *data, int len)
 {
     if (status != STATUS_RX)
         setMode(SingleWireRx);
-    uart_read_blocking(uart1, data, len);
+    DMA_SetChannelCallback(dmachRx, rx_handler, this);
+    dma_channel_transfer_to_buffer_now(dmachRx, data, len);
+
     return DEVICE_OK;
 }
 
